@@ -50,7 +50,7 @@ irods::error pam_auth_client_start(
     const char*                  _context ) {
     irods::error result = SUCCESS();
     irods::error ret;
-
+    //std::cout << _context << std::endl;
     // =-=-=-=-=-=-=-
     // validate incoming parameters
     ret = _ctx.valid< irods::pam_interactive_auth_object >();
@@ -238,7 +238,7 @@ irods::error pam_auth_client_request(
     // =-=-=-=-=-=-=-
     // handle errors and exit
     if ( status < 0 ) {
-        return ERROR( status, "call to rcAuthRequest failed." );
+       return ERROR( status, "call to rcAuthRequest failed." );
     }
     else {
         // =-=-=-=-=-=-=-
@@ -256,13 +256,41 @@ irods::error pam_auth_client_request(
 /// =-=-=-=-=-=-=-
 /// @brief function to run the local exec which will
 ///        actually do the auth check for us
+#ifdef RODS_SERVER
+
 #ifndef PAM_AUTH_CHECK_PROG
 #define PAM_AUTH_CHECK_PROG  "./irodsPamAuthCheck"
 #endif
+#include <tuple>
 int run_pam_auth_check(
     const std::string& _username,
     const std::string& _password ) {
-
+#if 0
+  bool unixSocket = true;
+  bool verbose = false;
+  long port = 0;
+  std::string addr = "/var/pam_handshake.socket";
+  int http_code;
+  std::string next_state;
+  std::string message;
+  std::string session;
+  std::string answer;
+  std::tuple<int, std::string> res;
+#endif
+  //std::tie(http_code, session) = curl_create_session(unixSocket,
+  //addr,
+  ///                                                   port,
+  //                                                   verbose);
+  return 1;
+  //std::tie(http_code,
+  //         next_state,
+  //         message) = exec_curl(unixSocket,
+  //                              addr,
+  //                              port,
+  //                              session,
+  //                              answer,
+  //                              verbose);
+  //std::cout << "http_code: " << http_code << " next_state: '" << next_state << "' message: '" << message << "'" << std::endl;
     int p2cp[2]; /* parent to child pipe */
     int pid, i;
     int status;
@@ -304,7 +332,10 @@ int run_pam_auth_check(
 
 } // run_pam_auth_check
 
-#ifdef RODS_SERVER
+
+//@todo move to different module
+//#include "handshake_client.cpp"
+
 // =-=-=-=-=-=-=-
 // handle an agent-side auth request call
 irods::error pam_auth_agent_request(

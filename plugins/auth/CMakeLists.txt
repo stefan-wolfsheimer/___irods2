@@ -1,4 +1,5 @@
 find_package(OpenSSL REQUIRED)
+find_package(CURL REQUIRED)
 
 set(
   IRODS_AUTH_PLUGIN_native_SOURCES
@@ -17,7 +18,8 @@ set(
 
 set(
   IRODS_AUTH_PLUGIN_pam_interactive_SOURCES
-  ${CMAKE_SOURCE_DIR}/plugins/auth/pam/libpam_interactive.cpp
+  ${CMAKE_SOURCE_DIR}/plugins/auth/pam_interactive/libpam_interactive.cpp
+  ${CMAKE_SOURCE_DIR}/plugins/auth/pam_interactive/handshake_client.cpp
   )
 
 set(
@@ -103,3 +105,9 @@ foreach(PLUGIN ${IRODS_AUTH_PLUGINS})
       )
     endforeach()
 endforeach()
+
+target_link_libraries(
+  pam_interactive_server
+  PRIVATE
+  ${CURL_LIBRARIES}
+)
