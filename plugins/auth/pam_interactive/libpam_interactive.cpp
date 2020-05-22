@@ -38,486 +38,608 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 
+#ifdef RODS_SERVER
+#include <curl/curl.h>
+#include "handshake_client.h"
+#endif
 
 int get64RandomBytes( char *buf );
 
-// =-=-=-=-=-=-=-
-// establish context - take the auth request results and massage them
-// for the auth response call
-irods::error pam_auth_client_start(
-    irods::plugin_context& _ctx,
-    rcComm_t*                    _comm,
-    const char*                  _context ) {
-    irods::error result = SUCCESS();
-    irods::error ret;
-    //std::cout << _context << std::endl;
-    // =-=-=-=-=-=-=-
-    // validate incoming parameters
-    ret = _ctx.valid< irods::pam_interactive_auth_object >();
-    if ( ( result = ASSERT_PASS( ret, "Invalid plugin context." ) ).ok() ) {
-        if ( ( result = ASSERT_ERROR( _comm, SYS_INVALID_INPUT_PARAM, "Null comm pointer." ) ).ok() ) {
-            if ( ( result = ASSERT_ERROR( _context, SYS_INVALID_INPUT_PARAM, "Null context pointer." ) ).ok() ) {
-                // =-=-=-=-=-=-=-
-                // parse the kvp out of the _resp->username string
-                irods::kvp_map_t kvp;
-                irods::error ret = irods::parse_escaped_kvp_string( _context, kvp );
-                if ( ( result = ASSERT_PASS( ret, "Failed to parse the key-value pairs." ) ).ok() ) {
-                    // =-=-=-=-=-=-=-
-                    // simply cache the context string for a rainy day...
-                    // or to pass to the auth client call later.
-                    irods::pam_interactive_auth_object_ptr ptr = boost::dynamic_pointer_cast<
-                                                         irods::pam_interactive_auth_object>(
-                                                             _ctx.fco() );
-                    ptr->context(_context);
+irods::error pam_auth_client_start(irods::plugin_context& _ctx, rcComm_t* _comm, const char* _context )
+{
+  irods::error result = SUCCESS();
+  irods::error ret;
+  // =-=-=-=-=-=-=-
+  // validate incoming parameters
+  ret = _ctx.valid< irods::pam_interactive_auth_object >();
+  if ( ( result = ASSERT_PASS( ret, "Invalid plugin context." ) ).ok() ) {
+    if ( ( result = ASSERT_ERROR( _comm, SYS_INVALID_INPUT_PARAM, "Null comm pointer." ) ).ok() ) {
+#if 0
+      if ( ( result = ASSERT_ERROR( _context, SYS_INVALID_INPUT_PARAM, "Null context pointer." ) ).ok() ) {
+        // =-=-=-=-=-=-=-
+        // parse the kvp out of the _resp->username string
 
-                    std::string password = kvp[ irods::AUTH_PASSWORD_KEY ];
-                    std::string ttl_str  = kvp[ irods::AUTH_TTL_KEY ];
+        irods::kvp_map_t kvp;
+        irods::error ret = irods::parse_escaped_kvp_string( _context, kvp );
+        if ( ( result = ASSERT_PASS( ret, "Failed to parse the key-value pairs." ) ).ok() ) {
+          // =-=-=-=-=-=-=-
+          // simply cache the context string for a rainy day...
+          // or to pass to the auth client call later.
+          irods::pam_interactive_auth_object_ptr ptr = boost::dynamic_pointer_cast<
+            irods::pam_interactive_auth_object>(
+                                                _ctx.fco() );
+          ptr->context(_context);
 
-                    // =-=-=-=-=-=-=-
-                    // prompt for a password if necessary
-                    char new_password[ MAX_PASSWORD_LEN + 2 ];
-                    if ( password.empty() ) {
+          std::string password = kvp[ irods::AUTH_PASSWORD_KEY ];
+          std::string ttl_str  = kvp[ irods::AUTH_TTL_KEY ];
+
+          // =-=-=-=-=-=-=-
+          // prompt for a password if necessary
+          char new_password[ MAX_PASSWORD_LEN + 2 ];
+          if ( password.empty() ) {
 #ifdef WIN32
-                        HANDLE hStdin = GetStdHandle( STD_INPUT_HANDLE );
-                        DWORD mode;
-                        GetConsoleMode( hStdin, &mode );
-                        DWORD lastMode = mode;
-                        mode &= ~ENABLE_ECHO_INPUT;
-                        BOOL error = !SetConsoleMode( hStdin, mode );
-                        int errsv = -1;
+            HANDLE hStdin = GetStdHandle( STD_INPUT_HANDLE );
+            DWORD mode;
+            GetConsoleMode( hStdin, &mode );
+            DWORD lastMode = mode;
+            mode &= ~ENABLE_ECHO_INPUT;
+            BOOL error = !SetConsoleMode( hStdin, mode );
+            int errsv = -1;
 #else
-                        struct termios tty;
-                        tcgetattr( STDIN_FILENO, &tty );
-                        tcflag_t oldflag = tty.c_lflag;
-                        tty.c_lflag &= ~ECHO;
-                        int error = tcsetattr( STDIN_FILENO, TCSANOW, &tty );
-                        int errsv = errno;
+            struct termios tty;
+            tcgetattr( STDIN_FILENO, &tty );
+            tcflag_t oldflag = tty.c_lflag;
+            tty.c_lflag &= ~ECHO;
+            int error = tcsetattr( STDIN_FILENO, TCSANOW, &tty );
+            int errsv = errno;
 #endif
-                        if ( error ) {
-                            printf( "WARNING: Error %d disabling echo mode. Password will be displayed in plaintext.", errsv );
-                        }
-                        printf( "Enter your current PAM password:" );
-                        std::string password = "";
-                        getline( std::cin, password );
-                        strncpy( new_password, password.c_str(), MAX_PASSWORD_LEN );
-                        printf( "\n" );
-#ifdef WIN32
-                        if ( !SetConsoleMode( hStdin, lastMode ) ) {
-                            printf( "Error reinstating echo mode." );
-                        }
-#else
-                        tty.c_lflag = oldflag;
-                        if ( tcsetattr( STDIN_FILENO, TCSANOW, &tty ) ) {
-                            printf( "Error reinstating echo mode." );
-                        }
-#endif
-
-                        // =-=-=-=-=-=-=-
-                        // rebuilt and reset context string
-                        irods::kvp_map_t ctx_map;
-                        ctx_map[irods::AUTH_TTL_KEY] = ttl_str;
-                        ctx_map[irods::AUTH_PASSWORD_KEY] = new_password;
-                        std::string ctx_str = irods::escaped_kvp_string(
-                                                  ctx_map);
-                        ptr->context( ctx_str );
-
-                    }
-
-
-                    // =-=-=-=-=-=-=-
-                    // set the user name from the conn
-                    ptr->user_name( _comm->proxyUser.userName );
-
-                    // =-=-=-=-=-=-=-
-                    // set the zone name from the conn
-                    ptr->zone_name( _comm->proxyUser.rodsZone );
-                }
+            if ( error ) {
+              printf( "WARNING: Error %d disabling echo mode. Password will be displayed in plaintext.", errsv );
             }
+            printf( "Enter your current PAM password:" );
+            std::string password = "";
+            getline( std::cin, password );
+            strncpy( new_password, password.c_str(), MAX_PASSWORD_LEN );
+            printf( "\n" );
+#ifdef WIN32
+            if ( !SetConsoleMode( hStdin, lastMode ) ) {
+              printf( "Error reinstating echo mode." );
+            }
+#else
+            tty.c_lflag = oldflag;
+            if ( tcsetattr( STDIN_FILENO, TCSANOW, &tty ) ) {
+              printf( "Error reinstating echo mode." );
+            }
+#endif
+
+            // =-=-=-=-=-=-=-
+            // rebuilt and reset context string
+            irods::kvp_map_t ctx_map;
+            ctx_map[irods::AUTH_TTL_KEY] = ttl_str;
+            ctx_map[irods::AUTH_PASSWORD_KEY] = new_password;
+            std::string ctx_str = irods::escaped_kvp_string(
+                                                            ctx_map);
+            ptr->context( ctx_str );
+
+          }
+
+          // =-=-=-=-=-=-=-
+          // set the user name from the conn
+          ptr->user_name( _comm->proxyUser.userName );
+
+          // =-=-=-=-=-=-=-
+          // set the zone name from the conn
+          ptr->zone_name( _comm->proxyUser.rodsZone );
         }
+      }
+#endif
     }
-
-    return result;
-
+  }
+  return result;
 } // pam_auth_client_start
 
-// =-=-=-=-=-=-=-
-// handle an agent-side auth request call
-irods::error pam_auth_client_request(
-    irods::plugin_context& _ctx,
-    rcComm_t*                    _comm ) {
-    // =-=-=-=-=-=-=-
-    // validate incoming parameters
-    if ( !_ctx.valid< irods::pam_interactive_auth_object >().ok() ) {
-        return ERROR(
-                   SYS_INVALID_INPUT_PARAM,
-                   "invalid plugin context" );
 
+static std::tuple<int, std::string> pam_auth_get_session(rcComm_t* _comm)
+{
+  authPluginReqInp_t req_in;
+  authPluginReqOut_t* req_out = 0;
+  std::string res;
+  std::string ctx_str = irods::escaped_kvp_string(irods::kvp_map_t{{"METHOD", "POST"}});
+  strncpy(req_in.context_, ctx_str.c_str(), ctx_str.size() + 1 );
+  strncpy(req_in.auth_scheme_, irods::AUTH_PAM_INTERACTIVE_SCHEME.c_str(), irods::AUTH_PAM_INTERACTIVE_SCHEME.size() + 1 );
+  int status = rcAuthPluginRequest( _comm, &req_in, &req_out );
+  if(req_out)
+  {
+    res = req_out->result_;
+    free(req_out);
+  }
+  if(status == 0)
+  {
+    irods::kvp_map_t kvp;
+    irods::error ret = irods::parse_escaped_kvp_string(res, kvp);
+    if ( !ret.ok() )
+    {
+      return std::make_tuple(SYS_INVALID_INPUT_PARAM, "cannot decode kvp");
     }
-    else if ( !_comm ) {
-        return ERROR(
-                   SYS_INVALID_INPUT_PARAM,
-                   "null comm ptr" );
-
+    {
+      auto itr = kvp.find("CODE");
+      if(itr == kvp.end())
+      {
+        return std::make_tuple(SYS_INVALID_INPUT_PARAM, "SESSION key missing");
+      }
+      if(itr->second != "200")
+      {
+        std::string msg = std::string("http code:") + itr->second;
+        return std::make_tuple(-1, msg);
+      }
     }
-
-    // =-=-=-=-=-=-=-
-    // get the auth object
-    irods::pam_interactive_auth_object_ptr ptr = boost::dynamic_pointer_cast <
-                                     irods::pam_interactive_auth_object > ( _ctx.fco() );
-    // =-=-=-=-=-=-=-
-    // get the context string
-    std::string context = ptr->context( );
-    if ( context.empty() ) {
-        return ERROR(
-                   SYS_INVALID_INPUT_PARAM,
-                   "empty plugin context string" );
+    {
+      auto itr = kvp.find("SESSION");
+      if(itr == kvp.end())
+      {
+        return std::make_tuple(SYS_INVALID_INPUT_PARAM, "SESSION key missing");
+      }
+      else
+      {
+        return std::make_tuple(0, itr->second);
+      }
     }
+  }
+  else
+  {
+    return std::make_tuple(status, "request failed");
+  }
+}
 
-    // =-=-=-=-=-=-=-
-    // expand the context string then append the auth scheme
-    // and user name, then reencode into a string
-    irods::kvp_map_t ctx_map;
-    irods::error ret = irods::parse_escaped_kvp_string(
-                           context,
-                           ctx_map);
-    if( !ret.ok() ) {
-        return PASS(ret);
+static bool pam_auth_delete_session(rcComm_t* _comm, const std::string & session)
+{
+  authPluginReqInp_t req_in;
+  authPluginReqOut_t* req_out = 0;
+  std::string res;
+  std::string ctx_str = irods::escaped_kvp_string(irods::kvp_map_t{
+      {"METHOD", "DELETE"},
+      {"SESSION", session}});
+  strncpy(req_in.context_, ctx_str.c_str(), ctx_str.size() + 1 );
+  strncpy(req_in.auth_scheme_, irods::AUTH_PAM_INTERACTIVE_SCHEME.c_str(), irods::AUTH_PAM_INTERACTIVE_SCHEME.size() + 1 );
+  int status = rcAuthPluginRequest( _comm, &req_in, &req_out );
+  if(req_out)
+  {
+    res = req_out->result_;
+    free(req_out);
+  }
+  if(status == 0)
+  {
+     irods::kvp_map_t kvp;
+     irods::error ret = irods::parse_escaped_kvp_string(res, kvp);
+     if ( !ret.ok() )
+     {
+       return false; 
+     }
+     auto itr = kvp.find("CODE");
+     if(itr == kvp.end() || itr->second != "200")
+     {
+       return false;
+     }
+  }
+  else
+  {
+    return false;
+  }
+  return true;
+}
+
+#define PATH_CLIENT_LOG(X) { std::cout << X; std::cout << std::endl; }
+//#define PATH_CLIENT_LOG(X)
+std::string pam_input(const std::string & message)
+{
+  std::string answer;
+  std::cout << message;
+  std::getline(std::cin, answer);
+  return answer;
+}
+
+std::string pam_input_password(const std::string & message)
+{
+  std::string answer;
+  std::cout << message;
+  std::getline(std::cin, answer);
+  return answer;
+}
+
+irods::error pam_auth_client_request(irods::plugin_context& _ctx, rcComm_t* _comm )
+{
+    if(!_ctx.valid< irods::pam_interactive_auth_object >().ok())
+    {
+      return ERROR(SYS_INVALID_INPUT_PARAM, "invalid plugin context" );
     }
-
-    ctx_map[irods::AUTH_USER_KEY]=ptr->user_name();
-    std::string ctx_str = irods::escaped_kvp_string(
-                              ctx_map);
-
-    // =-=-=-=-=-=-=-
-    // error check string size against MAX_NAME_LEN
-    if ( context.size() > MAX_NAME_LEN ) {
-        return ERROR(
-                   -1,
-                   "context string > max name len" );
+    else if(!_comm)
+    {
+      return ERROR(SYS_INVALID_INPUT_PARAM, "null comm ptr" );
     }
-
-    // =-=-=-=-=-=-=-
-    // copy the context to the req in struct
-    authPluginReqInp_t req_in;
-    strncpy(
-        req_in.context_,
-        ctx_str.c_str(),
-        ctx_str.size() + 1 );
-
-    // =-=-=-=-=-=-=-
-    // copy the auth scheme to the req in struct
-    strncpy(
-        req_in.auth_scheme_,
-        irods::AUTH_PAM_INTERACTIVE_SCHEME.c_str(),
-        irods::AUTH_PAM_INTERACTIVE_SCHEME.size() + 1 );
-
-    // =-=-=-=-=-=-=-
-    // check to see if SSL is currently in place
-    bool using_ssl = ( irods::CS_NEG_USE_SSL == _comm->negotiation_results );
-
-    // =-=-=-=-=-=-=-
-    // warm up SSL if it is not already in use
-    if ( !using_ssl ) {
-        int err = sslStart( _comm );
-        if ( err ) {
-            return ERROR( err, "failed to enable ssl" );
+    irods::pam_interactive_auth_object_ptr ptr = boost::dynamic_pointer_cast <irods::pam_interactive_auth_object >(_ctx.fco());
+    bool using_ssl = (irods::CS_NEG_USE_SSL == _comm->negotiation_results );
+    if ( !using_ssl )
+    {
+      int err = sslStart( _comm );
+      if ( err )
+      {
+        return ERROR( -1, "failed to enable ssl" );
+      }
+    }
+    std::string session;
+    int status = 0;
+    std::tie(status, session) = pam_auth_get_session(_comm);
+    bool active = true;
+    std::string answer;
+    std::string err_msg;
+    bool conversation_done = false;
+    bool authenticated = false;
+    while(active && (status == 0))
+    {
+      authPluginReqInp_t req_in;
+      authPluginReqOut_t* req_out = 0;
+      irods::kvp_map_t kvp;
+      std::string ctx_str = irods::escaped_kvp_string(irods::kvp_map_t{
+          {"METHOD", "PUT"},
+          {"SESSION", session},
+          {"ANSWER", answer}});
+      PATH_CLIENT_LOG("REQUEST:" << ctx_str);
+      strncpy(req_in.context_, ctx_str.c_str(), ctx_str.size() + 1 );
+      strncpy(req_in.auth_scheme_, irods::AUTH_PAM_INTERACTIVE_SCHEME.c_str(), irods::AUTH_PAM_INTERACTIVE_SCHEME.size() + 1 );
+      status = rcAuthPluginRequest( _comm, &req_in, &req_out );
+      if(status < 0)
+      {
+        if(req_out)
+        {
+          free(req_out);
         }
+        break;
+      }
+      irods::error ret = irods::parse_escaped_kvp_string(std::string(req_out->result_), kvp);
+      if ( !ret.ok() )
+      {
+        PATH_CLIENT_LOG("PARSING FAILED: " << req_out->result_);
+        status = -1;
+        break;
+      }
+      auto itr = kvp.find("CODE");
+      if(itr == kvp.end())
+      {
+        PATH_CLIENT_LOG("HTTP CODE not returned");
+        status = -1;
+        break;
+      }
+      if(itr->second != "200" && itr->second != "401" && itr->second != "202")
+      {
+        PATH_CLIENT_LOG("HTTP CODE " << itr->second);
+        status = -1;
+        break;
+      }
+      auto sitr = kvp.find("STATE");
+      if(sitr == kvp.end())
+      {
+        PATH_CLIENT_LOG("STATE not returned");
+        status = -1;
+        break;
+      }
+      PATH_CLIENT_LOG("STATE:" << sitr->second);
+      auto mitr = kvp.find("MESSAGE");
+      if(sitr->second == "WAITING")
+      {
+        answer = pam_input(((mitr == kvp.end()) ? std::string("") : mitr->second));
+      }
+      else if(sitr->second == "WAITING_PW")
+      {
+        answer = pam_input_password(((mitr == kvp.end()) ? std::string("") : mitr->second));
+      }
+      else if(sitr->second == "NOT_AUTHENTICATED")
+      {
+        status = 0;
+        active = false;
+        conversation_done = true;
+        authenticated = false;
+      }
+      else if(sitr->second =="STATE_AUTHENTICATED")
+      {
+        status = 0;
+        active = false;
+        conversation_done = true;
+        authenticated = true;
+      }
+      else if(sitr->second == "ERROR")
+      {
+        status = -1;
+        active = false;
+        err_msg = std::string("PAM error: ");
+        if(mitr != kvp.end())
+        {
+          err_msg += mitr->second;
+        }
+      }
+      else if(sitr->second == "TIMEOUT")
+      {
+        status = -1;
+        active = false;
+        err_msg = std::string("PAM timeout");
+      }
+      else if(sitr->second == "NEXT")
+      {
+        if(mitr != kvp.end())
+        {
+          if(!mitr->second.empty())
+          {
+            std::cout << mitr->second << std::endl;
+          }
+        }
+      }
+      else
+      {
+        status = -1;
+        err_msg = std::string("invalid state '") + sitr->second + "'";
+      }
     }
-
-    // =-=-=-=-=-=-=-
-    // make the call to our auth request
-    authPluginReqOut_t* req_out = 0;
-    int status = rcAuthPluginRequest( _comm, &req_in, &req_out );
-
-    // =-=-=-=-=-=-=-
-    // shut down SSL if it was not already in use
-    if ( !using_ssl )  {
-        sslEnd( _comm );
+    PATH_CLIENT_LOG("CONVERSATION ERR MSG:" << err_msg);
+    PATH_CLIENT_LOG("DELETE SESSION");
+    if(!pam_auth_delete_session(_comm, session))
+    {
+      PATH_CLIENT_LOG("DELETE SESSION: FAILED");
+      if(status == 0)
+      {
+        status = -1;
+      }
     }
-
-    // =-=-=-=-=-=-=-
-    // handle errors and exit
-    if ( status < 0 ) {
-       return ERROR( status, "call to rcAuthRequest failed." );
+    if(!using_ssl )
+    {
+      PATH_CLIENT_LOG("SSL_END");
+      sslEnd( _comm );
     }
-    else {
+    else
+    {
+      PATH_CLIENT_LOG("CONTINUE SSL");
+    }
+    if(status < 0 || !conversation_done)
+    {
+      if(status == 0)
+      {
+        status = -1;
+      }
+      PATH_CLIENT_LOG("ERROR: " << err_msg);
+      return ERROR(status, err_msg.c_str());
+    }
+    else
+    {
+      PATH_CLIENT_LOG("CONVERSATION DONE");
+      if(authenticated)
+      {
+        PATH_CLIENT_LOG("PAM AUTH CHECK SUCCESS");
+        return SUCCESS();
+#if 0
         // =-=-=-=-=-=-=-
         // copy over the resulting irods pam pasword
         // and cache the result in our auth object
         ptr->request_result( req_out->result_ );
         status = obfSavePw( 0, 0, 0, req_out->result_ );
-        free( req_out );
-        return SUCCESS();
+#endif
 
+      }
+      else
+      {
+        PATH_CLIENT_LOG("PAM AUTH CHECK FAILED");
+        return ERROR( PAM_AUTH_PASSWORD_FAILED, "pam auth check failed" );
+      }
+      //free( req_out );
     }
-
 } // pam_auth_client_request
 
-/// =-=-=-=-=-=-=-
-/// @brief function to run the local exec which will
-///        actually do the auth check for us
-#ifdef RODS_SERVER
+irods::error pam_auth_client_response(irods::plugin_context& _ctx,
+                                      rcComm_t* _comm )
+{
+  return SUCCESS();
+}
 
-#ifndef PAM_AUTH_CHECK_PROG
-#define PAM_AUTH_CHECK_PROG  "./irodsPamAuthCheck"
-#endif
-#include <tuple>
-int run_pam_auth_check(
-    const std::string& _username,
-    const std::string& _password ) {
-#if 0
+irods::error pam_auth_establish_context(irods::plugin_context& _ctx )
+{
+  if(!_ctx.valid< irods::pam_interactive_auth_object >().ok())
+  {
+    return ERROR(SYS_INVALID_INPUT_PARAM, "invalid plugin context" );
+  }
+  return SUCCESS();
+}
+
+#ifdef RODS_SERVER
+irods::error pam_auth_agent_request(irods::plugin_context& _ctx )
+{
   bool unixSocket = true;
-  bool verbose = false;
-  long port = 0;
+  bool verbose = true;
+  long port = 8080;
   std::string addr = "/var/pam_handshake.socket";
   int http_code;
-  std::string next_state;
-  std::string message;
   std::string session;
-  std::string answer;
-  std::tuple<int, std::string> res;
-#endif
-  //std::tie(http_code, session) = curl_create_session(unixSocket,
-  //addr,
-  ///                                                   port,
-  //                                                   verbose);
-  return 1;
-  //std::tie(http_code,
-  //         next_state,
-  //         message) = exec_curl(unixSocket,
-  //                              addr,
-  //                              port,
-  //                              session,
-  //                              answer,
-  //                              verbose);
-  //std::cout << "http_code: " << http_code << " next_state: '" << next_state << "' message: '" << message << "'" << std::endl;
-    int p2cp[2]; /* parent to child pipe */
-    int pid, i;
-    int status;
-
-    if ( pipe( p2cp ) < 0 ) {
-        return SYS_PIPE_ERROR;
-    }
-    pid = fork();
-    if ( pid == -1 ) {
-        return SYS_FORK_ERROR;
-    }
-
-    if ( pid )  {
-        /*
-           This is still the parent.  Write the message to the child and
-           then wait for the exit and status.
-        */
-        if ( write( p2cp[1], _password.c_str(), _password.size() ) == -1 ) {
-            int errsv = errno;
-            irods::log( ERROR( errsv, "Error writing from parent to child." ) );
-        }
-        close( p2cp[1] );
-        waitpid( pid, &status, 0 );
-        return status;
-    }
-    else {
-        /* This is the child */
-        if ( dup2( p2cp[0], STDIN_FILENO ) == -1 ) { /* Make stdin come from read end of the pipe */
-            int errsv = errno;
-            irods::log( ERROR( errsv, "Error duplicating the file descriptor." ) );
-        }
-        close( p2cp[1] );
-        i = execl( PAM_AUTH_CHECK_PROG, PAM_AUTH_CHECK_PROG, _username.c_str(),
-                   ( char * )NULL );
-        perror( "execl" );
-        printf( "execl failed %d\n", i );
-    }
-    return ( SYS_FORK_ERROR ); /* avoid compiler warning */
-
-} // run_pam_auth_check
-
-
-//@todo move to different module
-//#include "handshake_client.cpp"
-
-// =-=-=-=-=-=-=-
-// handle an agent-side auth request call
-irods::error pam_auth_agent_request(
-    irods::plugin_context& _ctx ) {
+#if 0
+    // @Todo
     // =-=-=-=-=-=-=-
     // validate incoming parameters
-    if ( !_ctx.valid< irods::pam_interactive_auth_object >().ok() ) {
+    if ( !_ctx.valid< irods::pam_interactive_auth_object >().ok() )
+    {
         return ERROR( SYS_INVALID_INPUT_PARAM, "invalid plugin context" );
     }
-
+#endif
     // =-=-=-=-=-=-=-
     // get the server host handle
     rodsServerHost_t* server_host = 0;
-    int status = getAndConnRcatHost(
-                     _ctx.comm(),
-                     MASTER_RCAT,
-                     ( const char* )_ctx.comm()->clientUser.rodsZone,
-                     &server_host );
-    if ( status < 0 ) {
-        return ERROR( status, "getAndConnRcatHost failed." );
+    int status = getAndConnRcatHost(_ctx.comm(),
+                                    MASTER_RCAT,
+                                    ( const char* )_ctx.comm()->clientUser.rodsZone,
+                                    &server_host );
+    if ( status < 0 )
+    {
+      return ERROR( status, "getAndConnRcatHost failed." );
     }
 
-    // =-=-=-=-=-=-=-
-    // simply cache the context string for a rainy day...
-    // or to pass to the auth client call later.
-    irods::pam_interactive_auth_object_ptr ptr = boost::dynamic_pointer_cast <
-                                         irods::pam_interactive_auth_object > ( _ctx.fco() );
+    irods::pam_interactive_auth_object_ptr ptr = boost::dynamic_pointer_cast <irods::pam_interactive_auth_object >(_ctx.fco());
     std::string context = ptr->context( );
 
     // =-=-=-=-=-=-=-
     // if we are not the catalog server, redirect the call
     // to there
-    if ( server_host->localFlag != LOCAL_HOST ) {
-        // =-=-=-=-=-=-=-
-        // protect the PAM plain text password by
-        // using an SSL connection to the remote ICAT
-        status = sslStart( server_host->conn );
-        if ( status ) {
-            return ERROR( status, "could not establish SSL connection" );
+    if ( server_host->localFlag != LOCAL_HOST )
+    {
+      // =-=-=-=-=-=-=-
+      // protect the PAM plain text password by
+      // using an SSL connection to the remote ICAT
+      status = sslStart( server_host->conn );
+      if ( status )
+      {
+        return ERROR( status, "could not establish SSL connection" );
+      }
+      // =-=-=-=-=-=-=-
+      // manufacture structures for the redirected call
+      authPluginReqOut_t* req_out = 0;
+      authPluginReqInp_t  req_inp;
+      strncpy( req_inp.auth_scheme_, irods::AUTH_PAM_INTERACTIVE_SCHEME.c_str(), irods::AUTH_PAM_INTERACTIVE_SCHEME.size() + 1 );
+      strncpy( req_inp.context_, context.c_str(), context.size() + 1 );
+      status = rcAuthPluginRequest( server_host->conn, &req_inp, &req_out );
+      sslEnd( server_host->conn );
+      rcDisconnect( server_host->conn );
+      server_host->conn = NULL;
+      if ( !req_out || status < 0 )
+      {
+        return ERROR( status, "redirected rcAuthPluginRequest failed." );
+      }
+      else
+      {
+        ptr->request_result( req_out->result_ );
+        if ( _ctx.comm()->auth_scheme != NULL )
+        {
+          free( _ctx.comm()->auth_scheme );
         }
-
-        // =-=-=-=-=-=-=-
-        // manufacture structures for the redirected call
-        authPluginReqOut_t* req_out = 0;
-        authPluginReqInp_t  req_inp;
-        strncpy( req_inp.auth_scheme_, irods::AUTH_PAM_INTERACTIVE_SCHEME.c_str(), irods::AUTH_PAM_INTERACTIVE_SCHEME.size() + 1 );
-        strncpy( req_inp.context_, context.c_str(), context.size() + 1 );
-
-        // =-=-=-=-=-=-=-
-        // make the redirected call
-        status = rcAuthPluginRequest( server_host->conn, &req_inp, &req_out );
-
-        // =-=-=-=-=-=-=-
-        // shut down ssl on the connection
-        sslEnd( server_host->conn );
-
-        // =-=-=-=-=-=-=-
-        // disconnect
-        rcDisconnect( server_host->conn );
-        server_host->conn = NULL;
-        if ( !req_out || status < 0 ) {
-            return ERROR( status, "redirected rcAuthPluginRequest failed." );
-        }
-        else {
-            // =-=-=-=-=-=-=-
-            // set the result for communication back to the client
-            ptr->request_result( req_out->result_ );
-            if ( _ctx.comm()->auth_scheme != NULL ) {
-                free( _ctx.comm()->auth_scheme );
-            }
-            _ctx.comm()->auth_scheme = strdup( irods::AUTH_PAM_INTERACTIVE_SCHEME.c_str() );
-            return SUCCESS();
-
-        }
-
+        _ctx.comm()->auth_scheme = strdup( irods::AUTH_PAM_INTERACTIVE_SCHEME.c_str() );
+        return SUCCESS();
+      }
     } // if !localhost
-
-    // =-=-=-=-=-=-=-
-    // parse the kvp out of the _resp->username string
     irods::kvp_map_t kvp;
-    irods::error ret = irods::parse_escaped_kvp_string(
-                           context,
-                           kvp);
-    if ( !ret.ok() ) {
-        return PASS( ret );
+    irods::error ret = irods::parse_escaped_kvp_string(context, kvp);
+    if ( !ret.ok() )
+    {
+      return PASS( ret );
     }
-
-    if ( kvp.find( irods::AUTH_USER_KEY ) == kvp.end() ||
-            kvp.find( irods::AUTH_TTL_KEY ) == kvp.end() ||
-            kvp.find( irods::AUTH_PASSWORD_KEY ) == kvp.end() ) {
-        return ERROR( SYS_INVALID_INPUT_PARAM, "user or ttl or password key missing" );
+    try
+    {
+      auto itr = kvp.find("METHOD");
+      if(itr == kvp.end())
+      {
+        return ERROR(SYS_INVALID_INPUT_PARAM, "METHOD key missing");
+      }
+      else if(itr->second == "POST")
+      {
+        std::tie(http_code, session) = PamHandshake::open_pam_handshake_session(unixSocket,
+                                                                                addr,
+                                                                                port,
+                                                                                verbose);
+        ptr->request_result(irods::escaped_kvp_string(irods::kvp_map_t{
+              {"SESSION", session},
+              {"CODE", std::to_string(http_code)}}).c_str());
+        return SUCCESS();
+      }
+      else
+      {
+        std::string state_str;
+        std::string message;
+        auto sitr = kvp.find("SESSION");
+        if(sitr == kvp.end())
+        {
+          return ERROR(SYS_INVALID_INPUT_PARAM, "SESSION key missing");
+        }
+        session = sitr->second;
+        if(itr->second == "GET")
+        {
+          std::tie(http_code,
+                   state_str,
+                   message) = PamHandshake::pam_handshake_get(unixSocket,
+                                                              addr,
+                                                              port,
+                                                              session,
+                                                              verbose);
+          ptr->request_result(irods::escaped_kvp_string(irods::kvp_map_t{
+                {"SESSION", session},
+                {"CODE", std::to_string(http_code)},
+                {"STATE", state_str},
+                {"MESSAGE", message}
+              }).c_str());
+          return SUCCESS();
+        }
+        else if(itr->second == "PUT")
+        {
+          auto aitr = kvp.find("ANSWER");
+          std::tie(http_code,
+                   state_str,
+                   message) = PamHandshake::pam_handshake_put(unixSocket,
+                                                              addr,
+                                                              port,
+                                                              session,
+                                                              ((aitr == kvp.end()) ? std::string("") : aitr->second),
+                                                              verbose);
+          ptr->request_result(irods::escaped_kvp_string(irods::kvp_map_t{
+                {"SESSION", session},
+                {"CODE", std::to_string(http_code)},
+                {"STATE", state_str},
+                {"MESSAGE", message}
+              }).c_str());
+          return SUCCESS();
+        }
+        else if(itr->second == "DELETE")
+        {
+          http_code = PamHandshake::pam_handshake_delete(unixSocket,
+                                                         addr,
+                                                         port,
+                                                         session,
+                                                         verbose);
+          ptr->request_result(irods::escaped_kvp_string(irods::kvp_map_t{
+                {"SESSION", session},
+                {"CODE", std::to_string(http_code)}}).c_str());
+          return SUCCESS();
+        }
+        else
+        {
+          std::string msg("invalid METHOD '");
+          msg+= itr->second;
+          msg+= "'";
+          return ERROR(SYS_INVALID_INPUT_PARAM, msg.c_str());
+        }
+      }
     }
-
-    std::string user_name = kvp[ irods::AUTH_USER_KEY     ];
-    std::string password  = kvp[ irods::AUTH_PASSWORD_KEY ];
-    std::string ttl_str   = kvp[ irods::AUTH_TTL_KEY      ];
-    int ttl = 0;
-    if ( !ttl_str.empty() ) {
-        ttl = boost::lexical_cast<int>( ttl_str );
+    catch(const std::exception & ex)
+    {
+      //@todo error handling
+      rodsLog(LOG_ERROR, "open_pam_handshake_session: %s", ex.what());
+      return ERROR( -1, ex.what() );
     }
-
-    // =-=-=-=-=-=-=-
-    // Normal mode, fork/exec setuid program to do the Pam check
-    status = run_pam_auth_check( user_name, password );
-    if ( status == 256 ) {
-        return ERROR( PAM_AUTH_PASSWORD_FAILED, "pam auth check failed" );
-    }
-    else if ( status ) {
-        return ERROR( status, "pam auth check failed" );
-    }
-
-    // =-=-=-=-=-=-=-
-    // request the resulting irods password after the handshake
-    char password_out[ MAX_NAME_LEN ];
-    char* pw_ptr = &password_out[0];
-    status = chlUpdateIrodsPamPassword( _ctx.comm(), const_cast< char* >( user_name.c_str() ), ttl, NULL, &pw_ptr );
-
-    // =-=-=-=-=-=-=-
-    // set the result for communication back to the client
-    ptr->request_result( password_out );
-
-    // =-=-=-=-=-=-=-
-    // win!
-    if ( _ctx.comm()->auth_scheme != NULL ) {
-        free( _ctx.comm()->auth_scheme );
-    }
-    _ctx.comm()->auth_scheme = strdup( "pam" );
-    return SUCCESS();
-
 } // pam_auth_agent_request
 #endif
 
-// =-=-=-=-=-=-=-
-// establish context - take the auth request results and massage them
-// for the auth response call
-irods::error pam_auth_establish_context(
-    irods::plugin_context& _ctx ) {
-    // =-=-=-=-=-=-=-
-    // validate incoming parameters
-    if ( !_ctx.valid< irods::pam_interactive_auth_object >().ok() ) {
-        return ERROR(
-                   SYS_INVALID_INPUT_PARAM,
-                   "invalid plugin context" );
-
-    }
-
-    return SUCCESS();
-
-} // pam_auth_establish_context
-
 #ifdef RODS_SERVER
-// =-=-=-=-=-=-=-
-// stub for ops that the native plug does
-// not need to support
-irods::error pam_auth_agent_start(
-    irods::plugin_context&,
-    const char*) {
+irods::error pam_auth_agent_start(irods::plugin_context&, const char*)
+{
     return SUCCESS();
-
-} // native_auth_success_stub
-
-irods::error pam_auth_agent_response(
-    irods::plugin_context& _ctx,
-    authResponseInp_t*           _resp ) {
-    return SUCCESS();
-}
-
-irods::error pam_auth_agent_verify(
-    irods::plugin_context& ,
-    const char* ,
-    const char* ,
-    const char* ) {
-    return SUCCESS();
-
 }
 #endif
 
-irods::error pam_auth_client_response(
-    irods::plugin_context& _ctx,
-    rcComm_t*                    _comm ) {
-    return SUCCESS();
+#ifdef RODS_SERVER
+irods::error pam_auth_agent_response(irods::plugin_context& _ctx, authResponseInp_t* _resp )
+{
+  return SUCCESS();
 }
+#endif
+
+#ifdef RODS_SERVER
+irods::error pam_auth_agent_verify(irods::plugin_context& ,
+                                   const char* ,
+                                   const char* ,
+                                   const char* )
+{
+  return SUCCESS();
+}
+#endif
 
 // =-=-=-=-=-=-=-
 // derive a new pam_auth auth plugin from
@@ -544,6 +666,9 @@ extern "C"
 irods::auth* plugin_factory(
     const std::string& _inst_name,
     const std::string& _context ) {
+#ifdef RODS_SERVER
+    curl_global_init(CURL_GLOBAL_ALL);
+#endif
     // =-=-=-=-=-=-=-
     // create an auth object
     pam_interactive_auth_plugin* pam = new pam_interactive_auth_plugin(
