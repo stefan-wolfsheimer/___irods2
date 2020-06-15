@@ -42,8 +42,10 @@ namespace irods {
             /// @brief serialize object to key-value pairs
             virtual error get_re_vars( rule_engine_vars_t& );
 
+            int verbose_level() const;
+            int verbose_level(int level);
         private:
-
+            int _verbose_level;
     }; // class pam_auth_object
 
 /// @brief Helpful typedef

@@ -19,6 +19,7 @@ set(
 set(
   IRODS_AUTH_PLUGIN_pam_interactive_SOURCES
   ${CMAKE_SOURCE_DIR}/plugins/auth/pam_interactive/libpam_interactive.cpp
+  ${CMAKE_SOURCE_DIR}/plugins/auth/pam_interactive/pam_interactive_config.cpp
   ${CMAKE_SOURCE_DIR}/plugins/auth/pam_interactive/handshake_client.cpp
   )
 
@@ -79,6 +80,7 @@ foreach(PLUGIN ${IRODS_AUTH_PLUGINS})
         ${IRODS_EXTERNALS_FULLPATH_BOOST}/include
         ${IRODS_EXTERNALS_FULLPATH_JANSSON}/include
         ${IRODS_EXTERNALS_FULLPATH_ARCHIVE}/include
+        ${IRODS_EXTERNALS_PACKAGE_ROOT}/json3.7.3-0/include
         ${OPENSSL_INCLUDE_DIR}
         )
 

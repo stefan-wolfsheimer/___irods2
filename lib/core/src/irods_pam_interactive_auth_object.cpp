@@ -13,9 +13,9 @@ namespace irods {
 
 // =-=-=-=-=-=-=-
 // public - ctor
-    pam_interactive_auth_object::pam_interactive_auth_object(
-        rError_t* _r_error ) :
-        auth_object( _r_error ) {
+    pam_interactive_auth_object::pam_interactive_auth_object(rError_t* _r_error ) :
+      auth_object( _r_error ),_verbose_level(0)
+    {
     } // ctor
 
 // =-=-=-=-=-=-=-
@@ -120,5 +120,17 @@ namespace irods {
         return SUCCESS();
 
     } // get_re_vars
+
+  int pam_interactive_auth_object::verbose_level() const
+  {
+    return _verbose_level;
+  }
+
+  
+  int pam_interactive_auth_object::verbose_level(int level)
+  {
+    _verbose_level = level;
+    return level;
+  }
 
 }; // namespace irods

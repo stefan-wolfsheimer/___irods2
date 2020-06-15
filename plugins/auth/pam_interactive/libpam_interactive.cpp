@@ -30,7 +30,6 @@
 #include <sstream>
 #include <string>
 #include <iostream>
-#include <termios.h>
 #include <unistd.h>
 
 // =-=-=-=-=-=-=-
@@ -38,102 +37,71 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 
+// 3rd party library
+#include <json.hpp>
+
+
 #ifdef RODS_SERVER
 #include <curl/curl.h>
 #include "handshake_client.h"
 #endif
+#include "pam_interactive_config.h"
 
 int get64RandomBytes( char *buf );
 
-irods::error pam_auth_client_start(irods::plugin_context& _ctx, rcComm_t* _comm, const char* _context )
+irods::error pam_auth_client_start(irods::plugin_context& _ctx,
+                                   rcComm_t* _comm,
+                                   const char* _context )
 {
   irods::error result = SUCCESS();
   irods::error ret;
   // =-=-=-=-=-=-=-
   // validate incoming parameters
   ret = _ctx.valid< irods::pam_interactive_auth_object >();
-  if ( ( result = ASSERT_PASS( ret, "Invalid plugin context." ) ).ok() ) {
-    if ( ( result = ASSERT_ERROR( _comm, SYS_INVALID_INPUT_PARAM, "Null comm pointer." ) ).ok() ) {
-#if 0
-      if ( ( result = ASSERT_ERROR( _context, SYS_INVALID_INPUT_PARAM, "Null context pointer." ) ).ok() ) {
+  if ( ( result = ASSERT_PASS( ret, "Invalid plugin context." ) ).ok() )
+  {
+    if ( ( result = ASSERT_ERROR( _comm, SYS_INVALID_INPUT_PARAM, "Null comm pointer." ) ).ok() )
+    {
+      if ( ( result = ASSERT_ERROR( _context, SYS_INVALID_INPUT_PARAM, "Null context pointer." ) ).ok() )
+      {
+        auto ptr = boost::dynamic_pointer_cast<irods::pam_interactive_auth_object>(_ctx.fco());
+
         // =-=-=-=-=-=-=-
-        // parse the kvp out of the _resp->username string
+        // set the user name from the conn
+        ptr->user_name( _comm->proxyUser.userName );
 
+        // =-=-=-=-=-=-=-
+        // set the zone name from the conn
+        ptr->zone_name( _comm->proxyUser.rodsZone );
+        ptr->context(std::string(_context));
         irods::kvp_map_t kvp;
-        irods::error ret = irods::parse_escaped_kvp_string( _context, kvp );
-        if ( ( result = ASSERT_PASS( ret, "Failed to parse the key-value pairs." ) ).ok() ) {
-          // =-=-=-=-=-=-=-
-          // simply cache the context string for a rainy day...
-          // or to pass to the auth client call later.
-          irods::pam_interactive_auth_object_ptr ptr = boost::dynamic_pointer_cast<
-            irods::pam_interactive_auth_object>(
-                                                _ctx.fco() );
-          ptr->context(_context);
-
-          std::string password = kvp[ irods::AUTH_PASSWORD_KEY ];
-          std::string ttl_str  = kvp[ irods::AUTH_TTL_KEY ];
-
-          // =-=-=-=-=-=-=-
-          // prompt for a password if necessary
-          char new_password[ MAX_PASSWORD_LEN + 2 ];
-          if ( password.empty() ) {
-#ifdef WIN32
-            HANDLE hStdin = GetStdHandle( STD_INPUT_HANDLE );
-            DWORD mode;
-            GetConsoleMode( hStdin, &mode );
-            DWORD lastMode = mode;
-            mode &= ~ENABLE_ECHO_INPUT;
-            BOOL error = !SetConsoleMode( hStdin, mode );
-            int errsv = -1;
-#else
-            struct termios tty;
-            tcgetattr( STDIN_FILENO, &tty );
-            tcflag_t oldflag = tty.c_lflag;
-            tty.c_lflag &= ~ECHO;
-            int error = tcsetattr( STDIN_FILENO, TCSANOW, &tty );
-            int errsv = errno;
-#endif
-            if ( error ) {
-              printf( "WARNING: Error %d disabling echo mode. Password will be displayed in plaintext.", errsv );
-            }
-            printf( "Enter your current PAM password:" );
-            std::string password = "";
-            getline( std::cin, password );
-            strncpy( new_password, password.c_str(), MAX_PASSWORD_LEN );
-            printf( "\n" );
-#ifdef WIN32
-            if ( !SetConsoleMode( hStdin, lastMode ) ) {
-              printf( "Error reinstating echo mode." );
-            }
-#else
-            tty.c_lflag = oldflag;
-            if ( tcsetattr( STDIN_FILENO, TCSANOW, &tty ) ) {
-              printf( "Error reinstating echo mode." );
-            }
-#endif
-
-            // =-=-=-=-=-=-=-
-            // rebuilt and reset context string
-            irods::kvp_map_t ctx_map;
-            ctx_map[irods::AUTH_TTL_KEY] = ttl_str;
-            ctx_map[irods::AUTH_PASSWORD_KEY] = new_password;
-            std::string ctx_str = irods::escaped_kvp_string(
-                                                            ctx_map);
-            ptr->context( ctx_str );
-
-          }
-
-          // =-=-=-=-=-=-=-
-          // set the user name from the conn
-          ptr->user_name( _comm->proxyUser.userName );
-
-          // =-=-=-=-=-=-=-
-          // set the zone name from the conn
-          ptr->zone_name( _comm->proxyUser.rodsZone );
+        irods::error ret = irods::parse_escaped_kvp_string(_context, kvp);
+        if ( !ret.ok() )
+        {
+          return ERROR(SYS_INVALID_INPUT_PARAM, "cannot decode kvp");
         }
-      }
-#endif
-    }
+        auto itr = kvp.find("VVERBOSE");
+        if(itr != kvp.end() && itr->second == "true")
+        {
+          ptr->verbose_level(2);
+        }
+        else
+        {
+          itr = kvp.find("VERBOSE");
+          if(itr != kvp.end() && itr->second == "true")
+          {
+            ptr->verbose_level(1);
+          }
+          else
+          {
+            ptr->verbose_level(0);
+          }
+        }
+        int VERBOSE_LEVEL = ptr->verbose_level();
+        PAM_CLIENT_LOG(PAMLOG_DEBUG, "pam_auth_client_start " << _context);
+        PAM_CLIENT_LOG(PAMLOG_DEBUG, "verbose level " << VERBOSE_LEVEL);
+      } // if context not null ptr
+    } // if comm not null ptr
   }
   return result;
 } // pam_auth_client_start
@@ -148,6 +116,7 @@ static std::tuple<int, std::string> pam_auth_get_session(rcComm_t* _comm)
   strncpy(req_in.context_, ctx_str.c_str(), ctx_str.size() + 1 );
   strncpy(req_in.auth_scheme_, irods::AUTH_PAM_INTERACTIVE_SCHEME.c_str(), irods::AUTH_PAM_INTERACTIVE_SCHEME.size() + 1 );
   int status = rcAuthPluginRequest( _comm, &req_in, &req_out );
+
   if(req_out)
   {
     res = req_out->result_;
@@ -228,23 +197,6 @@ static bool pam_auth_delete_session(rcComm_t* _comm, const std::string & session
   return true;
 }
 
-#define PATH_CLIENT_LOG(X) { std::cout << X; std::cout << std::endl; }
-//#define PATH_CLIENT_LOG(X)
-std::string pam_input(const std::string & message)
-{
-  std::string answer;
-  std::cout << message;
-  std::getline(std::cin, answer);
-  return answer;
-}
-
-std::string pam_input_password(const std::string & message)
-{
-  std::string answer;
-  std::cout << message;
-  std::getline(std::cin, answer);
-  return answer;
-}
 
 irods::error pam_auth_client_request(irods::plugin_context& _ctx, rcComm_t* _comm )
 {
@@ -256,10 +208,15 @@ irods::error pam_auth_client_request(irods::plugin_context& _ctx, rcComm_t* _com
     {
       return ERROR(SYS_INVALID_INPUT_PARAM, "null comm ptr" );
     }
+    nlohmann::json json_conversation;
     irods::pam_interactive_auth_object_ptr ptr = boost::dynamic_pointer_cast <irods::pam_interactive_auth_object >(_ctx.fco());
     bool using_ssl = (irods::CS_NEG_USE_SSL == _comm->negotiation_results );
+    int VERBOSE_LEVEL = ptr->verbose_level();
+    PAM_CLIENT_LOG(PAMLOG_DEBUG, "pam_auth_client_start " << ptr->context());
+    PAM_CLIENT_LOG(PAMLOG_DEBUG, "verbose level " << VERBOSE_LEVEL);
     if ( !using_ssl )
     {
+      PAM_CLIENT_LOG(PAMLOG_DEBUG, "sslStart");
       int err = sslStart( _comm );
       if ( err )
       {
@@ -283,9 +240,26 @@ irods::error pam_auth_client_request(irods::plugin_context& _ctx, rcComm_t* _com
           {"METHOD", "PUT"},
           {"SESSION", session},
           {"ANSWER", answer}});
-      PATH_CLIENT_LOG("REQUEST:" << ctx_str);
+      if(VERBOSE_LEVEL >= PAMLOG_DEBUG)
+      {
+        std::string dbg_ctx_str = irods::escaped_kvp_string(irods::kvp_map_t{
+          {"METHOD", "PUT"},
+          {"SESSION", session},
+          {"ANSWER", "***"}});
+        PAM_CLIENT_LOG(PAMLOG_DEBUG, "REQUEST:" << dbg_ctx_str);
+      }
+
+      if((ctx_str.size() + 1) > MAX_NAME_LEN)
+      {
+        std::cerr << "input lenght exceeded (" << ctx_str.size() << ">=" << MAX_NAME_LEN << ")"
+                  << std::endl;
+        status = SYS_BAD_INPUT;
+        break;
+      }
       strncpy(req_in.context_, ctx_str.c_str(), ctx_str.size() + 1 );
-      strncpy(req_in.auth_scheme_, irods::AUTH_PAM_INTERACTIVE_SCHEME.c_str(), irods::AUTH_PAM_INTERACTIVE_SCHEME.size() + 1 );
+      strncpy(req_in.auth_scheme_,
+              irods::AUTH_PAM_INTERACTIVE_SCHEME.c_str(),
+              irods::AUTH_PAM_INTERACTIVE_SCHEME.size() + 1 );
       status = rcAuthPluginRequest( _comm, &req_in, &req_out );
       if(status < 0)
       {
@@ -293,44 +267,51 @@ irods::error pam_auth_client_request(irods::plugin_context& _ctx, rcComm_t* _com
         {
           free(req_out);
         }
+        if(status == PAM_AUTH_PASSWORD_FAILED)
+        {
+          conversation_done = true;
+          authenticated = false;
+        }
         break;
       }
       irods::error ret = irods::parse_escaped_kvp_string(std::string(req_out->result_), kvp);
       if ( !ret.ok() )
       {
-        PATH_CLIENT_LOG("PARSING FAILED: " << req_out->result_);
+        PAM_CLIENT_LOG(PAMLOG_INFO, "PARSING FAILED: " << req_out->result_);
         status = -1;
         break;
       }
       auto itr = kvp.find("CODE");
       if(itr == kvp.end())
       {
-        PATH_CLIENT_LOG("HTTP CODE not returned");
+        PAM_CLIENT_LOG(PAMLOG_INFO, "HTTP CODE not returned");
         status = -1;
         break;
       }
       if(itr->second != "200" && itr->second != "401" && itr->second != "202")
       {
-        PATH_CLIENT_LOG("HTTP CODE " << itr->second);
+        PAM_CLIENT_LOG(PAMLOG_INFO, "HTTP CODE " << itr->second);
         status = -1;
         break;
       }
       auto sitr = kvp.find("STATE");
       if(sitr == kvp.end())
       {
-        PATH_CLIENT_LOG("STATE not returned");
+        PAM_CLIENT_LOG(PAMLOG_INFO, "STATE not returned");
         status = -1;
         break;
       }
-      PATH_CLIENT_LOG("STATE:" << sitr->second);
+      PAM_CLIENT_LOG(PAMLOG_INFO, "STATE:" << sitr->second);
       auto mitr = kvp.find("MESSAGE");
       if(sitr->second == "WAITING")
       {
-        answer = pam_input(((mitr == kvp.end()) ? std::string("") : mitr->second));
+        answer = pam_input(((mitr == kvp.end()) ? std::string("") : mitr->second),
+                           json_conversation);
       }
       else if(sitr->second == "WAITING_PW")
       {
-        answer = pam_input_password(((mitr == kvp.end()) ? std::string("") : mitr->second));
+        answer = pam_input_password(((mitr == kvp.end()) ? std::string("") : mitr->second),
+                                    json_conversation);
       }
       else if(sitr->second == "NOT_AUTHENTICATED")
       {
@@ -378,54 +359,57 @@ irods::error pam_auth_client_request(irods::plugin_context& _ctx, rcComm_t* _com
         err_msg = std::string("invalid state '") + sitr->second + "'";
       }
     }
-    PATH_CLIENT_LOG("CONVERSATION ERR MSG:" << err_msg);
-    PATH_CLIENT_LOG("DELETE SESSION");
-    if(!pam_auth_delete_session(_comm, session))
+    if(!err_msg.empty())
     {
-      PATH_CLIENT_LOG("DELETE SESSION: FAILED");
-      if(status == 0)
-      {
-        status = -1;
-      }
+      PAM_CLIENT_LOG(PAMLOG_INFO, "CONVERSATION ERR MSG:" << err_msg);
     }
     if(!using_ssl )
     {
-      PATH_CLIENT_LOG("SSL_END");
+      PAM_CLIENT_LOG(PAMLOG_DEBUG, "SSL_END");
       sslEnd( _comm );
     }
     else
     {
-      PATH_CLIENT_LOG("CONTINUE SSL");
+      PAM_CLIENT_LOG(PAMLOG_DEBUG, "CONTINUE SSL");
     }
     if(status < 0 || !conversation_done)
     {
+      PAM_CLIENT_LOG(PAMLOG_DEBUG,
+                     "ERROR: " << err_msg <<
+                     " status:" << status <<
+                     " conversation done:" << conversation_done);
       if(status == 0)
       {
         status = -1;
       }
-      PATH_CLIENT_LOG("ERROR: " << err_msg);
       return ERROR(status, err_msg.c_str());
     }
     else
     {
-      PATH_CLIENT_LOG("CONVERSATION DONE");
+      PAM_CLIENT_LOG(PAMLOG_DEBUG, "CONVERSATION DONE");
       if(authenticated)
       {
-        PATH_CLIENT_LOG("PAM AUTH CHECK SUCCESS");
-        return SUCCESS();
-#if 0
+        PAM_CLIENT_LOG(PAMLOG_DEBUG, "PAM AUTH CHECK SUCCESS");
         // =-=-=-=-=-=-=-
-        // copy over the resulting irods pam pasword
         // and cache the result in our auth object
-        ptr->request_result( req_out->result_ );
-        status = obfSavePw( 0, 0, 0, req_out->result_ );
-#endif
-
+        std::stringstream ss;
+        ss << json_conversation;
+        ptr->request_result(ss.str().c_str());
+        status = save_conversation(json_conversation, VERBOSE_LEVEL);
+        if(status != 0)
+        {
+          return ERROR(status, "failed to save conversation" );
+        }
+        else
+        {
+          return SUCCESS();
+        }
       }
       else
       {
-        PATH_CLIENT_LOG("PAM AUTH CHECK FAILED");
+        PAM_CLIENT_LOG(PAMLOG_DEBUG, "PAM AUTH CHECK FAILED");
         return ERROR( PAM_AUTH_PASSWORD_FAILED, "pam auth check failed" );
+
       }
       //free( req_out );
     }
@@ -478,7 +462,6 @@ irods::error pam_auth_agent_request(irods::plugin_context& _ctx )
 
     irods::pam_interactive_auth_object_ptr ptr = boost::dynamic_pointer_cast <irods::pam_interactive_auth_object >(_ctx.fco());
     std::string context = ptr->context( );
-
     // =-=-=-=-=-=-=-
     // if we are not the catalog server, redirect the call
     // to there
@@ -579,13 +562,43 @@ irods::error pam_auth_agent_request(irods::plugin_context& _ctx )
                                                               session,
                                                               ((aitr == kvp.end()) ? std::string("") : aitr->second),
                                                               verbose);
+          if(state_str == "NOT_AUTHENTICATED" ||
+             state_str == "STATE_AUTHENTICATED" ||
+             state_str == "ERROR" ||
+             state_str == "TIMEOUT")
+          {
+            PamHandshake::pam_handshake_delete(unixSocket,
+                                               addr,
+                                               port,
+                                               session,
+                                               verbose);
+          }
           ptr->request_result(irods::escaped_kvp_string(irods::kvp_map_t{
                 {"SESSION", session},
                 {"CODE", std::to_string(http_code)},
                 {"STATE", state_str},
                 {"MESSAGE", message}
               }).c_str());
-          return SUCCESS();
+          if(state_str == "NOT_AUTHENTICATED")
+          {
+            return ERROR(PAM_AUTH_PASSWORD_FAILED, "pam auth check failed" );
+          }
+          else if(state_str == "STATE_AUTHENTICATED")
+          {
+            return SUCCESS();
+          }
+          else if(state_str == "ERROR" || state_str == "TIMEOUT")
+          {
+            return ERROR( -1,
+                          (std::string("pam aux service failure ") +
+                           state_str +
+                           std::string(" ") +
+                           message).c_str());
+          }
+          else
+          {
+            return SUCCESS();
+          }
         }
         else if(itr->second == "DELETE")
         {
