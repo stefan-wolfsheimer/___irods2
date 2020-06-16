@@ -9,6 +9,8 @@
 #include "authRequest.h"
 #include "authResponse.h"
 #include "authCheck.h"
+#include "rsAuthRequest.hpp"
+#include "rsAuthCheck.hpp"
 #include "miscServerFunct.hpp"
 #include "authPluginRequest.h"
 #include "icatHighLevelRoutines.hpp"
@@ -31,6 +33,10 @@
 #include <string>
 #include <iostream>
 #include <unistd.h>
+#include <algorithm>
+
+// md5
+#include <openssl/md5.h>
 
 // =-=-=-=-=-=-=-
 // system includes
@@ -62,6 +68,10 @@ irods::error pam_auth_client_start(irods::plugin_context& _ctx,
   {
     if ( ( result = ASSERT_ERROR( _comm, SYS_INVALID_INPUT_PARAM, "Null comm pointer." ) ).ok() )
     {
+      if(!_context)
+      {
+        _context = "";
+      }
       if ( ( result = ASSERT_ERROR( _context, SYS_INVALID_INPUT_PARAM, "Null context pointer." ) ).ok() )
       {
         auto ptr = boost::dynamic_pointer_cast<irods::pam_interactive_auth_object>(_ctx.fco());
@@ -98,6 +108,12 @@ irods::error pam_auth_client_start(irods::plugin_context& _ctx,
           }
         }
         int VERBOSE_LEVEL = ptr->verbose_level();
+        itr = kvp.find("ECHO");
+        if(itr != kvp.end() && itr->second == "true")
+        {
+          ptr->do_echo(true);
+        }
+
         PAM_CLIENT_LOG(PAMLOG_DEBUG, "pam_auth_client_start " << _context);
         PAM_CLIENT_LOG(PAMLOG_DEBUG, "verbose level " << VERBOSE_LEVEL);
       } // if context not null ptr
@@ -197,7 +213,7 @@ static bool pam_auth_delete_session(rcComm_t* _comm, const std::string & session
   return true;
 }
 
-
+void setSessionSignatureClientside(char* _sig);
 irods::error pam_auth_client_request(irods::plugin_context& _ctx, rcComm_t* _comm )
 {
     if(!_ctx.valid< irods::pam_interactive_auth_object >().ok())
@@ -208,10 +224,10 @@ irods::error pam_auth_client_request(irods::plugin_context& _ctx, rcComm_t* _com
     {
       return ERROR(SYS_INVALID_INPUT_PARAM, "null comm ptr" );
     }
-    nlohmann::json json_conversation;
-    irods::pam_interactive_auth_object_ptr ptr = boost::dynamic_pointer_cast <irods::pam_interactive_auth_object >(_ctx.fco());
+    auto ptr = boost::dynamic_pointer_cast <irods::pam_interactive_auth_object >(_ctx.fco());
     bool using_ssl = (irods::CS_NEG_USE_SSL == _comm->negotiation_results );
     int VERBOSE_LEVEL = ptr->verbose_level();
+    bool do_echo = ptr->do_echo();
     PAM_CLIENT_LOG(PAMLOG_DEBUG, "pam_auth_client_start " << ptr->context());
     PAM_CLIENT_LOG(PAMLOG_DEBUG, "verbose level " << VERBOSE_LEVEL);
     if ( !using_ssl )
@@ -222,6 +238,16 @@ irods::error pam_auth_client_request(irods::plugin_context& _ctx, rcComm_t* _com
       {
         return ERROR( -1, "failed to enable ssl" );
       }
+    }
+    nlohmann::json json_conversation;
+    try
+    {
+      json_conversation = PamHandshake::load_conversation(VERBOSE_LEVEL);
+    }
+    catch(const std::exception & ex)
+    {
+      PAM_CLIENT_LOG(PAMLOG_INFO, "failed to load conversation file " << ex.what());
+      json_conversation = "{}"_json;
     }
     std::string session;
     int status = 0;
@@ -305,13 +331,15 @@ irods::error pam_auth_client_request(irods::plugin_context& _ctx, rcComm_t* _com
       auto mitr = kvp.find("MESSAGE");
       if(sitr->second == "WAITING")
       {
-        answer = pam_input(((mitr == kvp.end()) ? std::string("") : mitr->second),
-                           json_conversation);
+        answer = PamHandshake::pam_input(((mitr == kvp.end()) ? std::string("") : mitr->second),
+                                         json_conversation,
+                                         do_echo);
       }
       else if(sitr->second == "WAITING_PW")
       {
-        answer = pam_input_password(((mitr == kvp.end()) ? std::string("") : mitr->second),
-                                    json_conversation);
+        answer = PamHandshake::pam_input_password(((mitr == kvp.end()) ? std::string("") : mitr->second),
+                                                  json_conversation,
+                                                  do_echo);
       }
       else if(sitr->second == "NOT_AUTHENTICATED")
       {
@@ -347,7 +375,7 @@ irods::error pam_auth_client_request(irods::plugin_context& _ctx, rcComm_t* _com
       {
         if(mitr != kvp.end())
         {
-          if(!mitr->second.empty())
+          if(!mitr->second.empty() && do_echo)
           {
             std::cout << mitr->second << std::endl;
           }
@@ -395,15 +423,15 @@ irods::error pam_auth_client_request(irods::plugin_context& _ctx, rcComm_t* _com
         std::stringstream ss;
         ss << json_conversation;
         ptr->request_result(ss.str().c_str());
-        status = save_conversation(json_conversation, VERBOSE_LEVEL);
-        if(status != 0)
+        try
         {
-          return ERROR(status, "failed to save conversation" );
+          PamHandshake::save_conversation(json_conversation, VERBOSE_LEVEL);
         }
-        else
+        catch(const std::exception & ex)
         {
-          return SUCCESS();
+          return ERROR(-1, ex.what());
         }
+        return SUCCESS();
       }
       else
       {
@@ -415,10 +443,28 @@ irods::error pam_auth_client_request(irods::plugin_context& _ctx, rcComm_t* _com
     }
 } // pam_auth_client_request
 
-irods::error pam_auth_client_response(irods::plugin_context& _ctx,
-                                      rcComm_t* _comm )
+static std::string serialize_ordered(const nlohmann::json & j)
 {
-  return SUCCESS();
+  std::set<std::string> ordered;
+  for (auto& el : j.items())
+  {
+    ordered.insert(el.key());
+  }
+  std::stringstream ss;
+  bool first = true;
+  for(auto& n: ordered)
+  {
+    if(first)
+    {
+      first = false;
+    }
+    else
+    {
+      ss << ",";
+    }
+    ss << nlohmann::json(n) << ":" << j[n]["answer"];
+  }
+  return ss.str();
 }
 
 irods::error pam_auth_establish_context(irods::plugin_context& _ctx )
@@ -427,7 +473,57 @@ irods::error pam_auth_establish_context(irods::plugin_context& _ctx )
   {
     return ERROR(SYS_INVALID_INPUT_PARAM, "invalid plugin context" );
   }
+  auto ptr = boost::dynamic_pointer_cast <irods::pam_interactive_auth_object > (_ctx.fco());
+  std::string request_result(serialize_ordered(nlohmann::json::parse(ptr->request_result())));
+  std::size_t len = std::max(std::size_t(request_result.size() + 1),
+                             std::size_t(16));
+  char * md5_buf = (char*)malloc(len);
+  memset(md5_buf, 0, len);
+  strcpy(md5_buf, request_result.c_str());
+  setSessionSignatureClientside(md5_buf);
+  MD5_CTX context;
+  MD5_Init( &context );
+  MD5_Update(&context, ( unsigned char* )md5_buf, request_result.size());
+  free(md5_buf);
+  char digest[ RESPONSE_LEN + 2 ];
+  MD5_Final((unsigned char* )digest, &context );
+  for ( int i = 0; i < RESPONSE_LEN; ++i )
+  {
+    if ( digest[ i ] == '\0' )
+    {
+      digest[ i ]++;
+    }
+  }
+  ptr->digest(digest);
   return SUCCESS();
+}
+
+irods::error pam_auth_client_response(irods::plugin_context& _ctx,
+                                      rcComm_t* _comm )
+{
+  irods::error result = SUCCESS();
+  irods::error ret;
+  // =-=-=-=-=-=-=-
+  // validate incoming parameters
+  ret = _ctx.valid<irods::pam_interactive_auth_object>();
+  if ( ( result = ASSERT_PASS( ret, "Invalid plugin context." ) ).ok() )
+  {
+    if ( ( result = ASSERT_ERROR( _comm, SYS_INVALID_INPUT_PARAM, "Null rcComm_t pointer." ) ).ok() )
+    {
+      // =-=-=-=-=-=-=-
+      // get the auth object
+      auto ptr = boost::dynamic_pointer_cast<irods::pam_interactive_auth_object>( _ctx.fco() );
+      std::string user_name = ptr->user_name() + "#" + ptr->zone_name();
+      char username[ MAX_NAME_LEN ];
+      snprintf( username, MAX_NAME_LEN, "%s", user_name.c_str() );
+      authResponseInp_t auth_response;
+      auth_response.response = const_cast<char*>(ptr->digest().c_str());
+      auth_response.username = username;
+      int status = rcAuthResponse( _comm, &auth_response );
+      result = ASSERT_ERROR( status >= 0, status, "Call to rcAuthResponseFailed." );
+    }
+  }
+  return result;
 }
 
 #ifdef RODS_SERVER
@@ -638,18 +734,171 @@ irods::error pam_auth_agent_start(irods::plugin_context&, const char*)
 #endif
 
 #ifdef RODS_SERVER
+// copied code from lib native. Need better solution.
+//const static int requireServerAuth = 0;
+//const static int requireSIDs = 0;
+//void _rsSetAuthRequestGetChallenge( const char* _c );
+
+static irods::error check_proxy_user_privileges(
+    rsComm_t *rsComm,
+    int proxyUserPriv ) {
+    irods::error result = SUCCESS();
+
+    if ( strcmp( rsComm->proxyUser.userName, rsComm->clientUser.userName ) != 0 ) {
+
+        /* remote privileged user can only do things on behalf of users from
+         * the same zone */
+        result = ASSERT_ERROR( proxyUserPriv >= LOCAL_PRIV_USER_AUTH ||
+                               ( proxyUserPriv >= REMOTE_PRIV_USER_AUTH &&
+                                 strcmp( rsComm->proxyUser.rodsZone, rsComm->clientUser.rodsZone ) == 0 ),
+                               SYS_PROXYUSER_NO_PRIV,
+                               "Proxyuser: \"%s\" with %d no priv to auth clientUser: \"%s\".",
+                               rsComm->proxyUser.userName, proxyUserPriv, rsComm->clientUser.userName );
+    }
+
+    return result;
+}
+
 irods::error pam_auth_agent_response(irods::plugin_context& _ctx, authResponseInp_t* _resp )
 {
+  irods::error ret = SUCCESS();
+  ret = _ctx.valid();
+  if ( !ret.ok() )
+  {
+    return PASSMSG( "Invalid plugin context.", ret );
+  }
+  if ( NULL == _resp )
+  {
+    return ERROR( SYS_INVALID_INPUT_PARAM, "Invalid response or comm pointers." );
+  }
+  authCheckInp_t authCheckInp;
+  authCheckOut_t *authCheckOut = NULL;
+  rodsServerHost_t *rodsServerHost;
+  int status;
+  memset( &authCheckInp, 0, sizeof( authCheckInp ) );
+  status = getAndConnRcatHostNoLogin(_ctx.comm(),
+                                     MASTER_RCAT,
+                                     _ctx.comm()->proxyUser.rodsZone,
+                                     &rodsServerHost );
+  if ( status < 0 )
+  {
+    return ERROR( status, "Connecting to rcat host failed." );
+  }
+  std::string response =
+    irods::AUTH_SCHEME_KEY +
+    irods::kvp_association() +
+    irods::AUTH_PAM_INTERACTIVE_SCHEME +
+    irods::kvp_delimiter() +
+    irods::AUTH_RESPONSE_KEY +
+    irods::kvp_association() +
+    _resp->response;
+  authCheckInp.response = const_cast<char*>(response.c_str());
+  authCheckInp.username = _resp->username;
+  authCheckInp.challenge = "dummy";
+  if ( LOCAL_HOST == rodsServerHost->localFlag )
+  {
+    status = rsAuthCheck( _ctx.comm(), &authCheckInp, &authCheckOut );
+  }
+  else
+  {
+    status = rcAuthCheck( rodsServerHost->conn, &authCheckInp, &authCheckOut );
+    /* not likely we need this connection again */
+    rcDisconnect( rodsServerHost->conn );
+    rodsServerHost->conn = NULL;
+  }
+  if(status < 0)
+  {
+    free( authCheckOut->serverResponse );
+    free( authCheckOut );
+    return ERROR(status, "rcAuthCheck failed");
+  }
+
+  /* have to modify privLevel if the icat is a foreign icat because
+   * a local user in a foreign zone is not a local user in this zone
+   * and vice versa for a remote user
+   */
+  if ( rodsServerHost->rcatEnabled == REMOTE_ICAT )
+  {
+    /* proxy is easy because rodsServerHost is based on proxy user */
+    if ( authCheckOut->privLevel == LOCAL_PRIV_USER_AUTH)
+    {
+      authCheckOut->privLevel = REMOTE_PRIV_USER_AUTH;
+    }
+    else if ( authCheckOut->privLevel == LOCAL_USER_AUTH )
+    {
+      authCheckOut->privLevel = REMOTE_USER_AUTH;
+    }
+
+    /* adjust client user */
+    if ( strcmp( _ctx.comm()->proxyUser.userName,  _ctx.comm()->clientUser.userName ) == 0 )
+    {
+      authCheckOut->clientPrivLevel = authCheckOut->privLevel;
+    }
+    else
+    {
+      zoneInfo_t *tmpZoneInfo;
+      status = getLocalZoneInfo( &tmpZoneInfo );
+      if ( status < 0 )
+      {
+        free( authCheckOut->serverResponse );
+        free( authCheckOut );
+        return ERROR(status, "getLocalZoneInfo failed" );
+      }
+      if ( strcmp( tmpZoneInfo->zoneName,  _ctx.comm()->clientUser.rodsZone ) == 0 )
+      {
+        /* client is from local zone */
+        if ( authCheckOut->clientPrivLevel == REMOTE_PRIV_USER_AUTH )
+        {
+          authCheckOut->clientPrivLevel = LOCAL_PRIV_USER_AUTH;
+        }
+        else if ( authCheckOut->clientPrivLevel == REMOTE_USER_AUTH )
+        {
+          authCheckOut->clientPrivLevel = LOCAL_USER_AUTH;
+        }
+      }
+      else
+      {
+        /* client is from remote zone */
+        if ( authCheckOut->clientPrivLevel == LOCAL_PRIV_USER_AUTH )
+        {
+          authCheckOut->clientPrivLevel = REMOTE_USER_AUTH;
+        }
+        else if ( authCheckOut->clientPrivLevel == LOCAL_USER_AUTH )
+        {
+          authCheckOut->clientPrivLevel = REMOTE_USER_AUTH;
+        }
+      }
+    }
+  }
+  else if ( strcmp( _ctx.comm()->proxyUser.userName,  _ctx.comm()->clientUser.userName ) == 0 )
+  {
+    authCheckOut->clientPrivLevel = authCheckOut->privLevel;
+  }
+
+  if ( strcmp( _ctx.comm()->proxyUser.userName,  _ctx.comm()->clientUser.userName ) != 0 )
+  {
+    _ctx.comm()->proxyUser.authInfo.authFlag = authCheckOut->privLevel;
+    _ctx.comm()->clientUser.authInfo.authFlag = authCheckOut->clientPrivLevel;
+  }
+  else
+  {
+    /* proxyUser and clientUser are the same */
+    _ctx.comm()->proxyUser.authInfo.authFlag =
+      _ctx.comm()->clientUser.authInfo.authFlag = authCheckOut->privLevel;
+  }
+  free( authCheckOut->serverResponse );
+  free( authCheckOut );
   return SUCCESS();
 }
 #endif
 
 #ifdef RODS_SERVER
 irods::error pam_auth_agent_verify(irods::plugin_context& ,
-                                   const char* ,
-                                   const char* ,
-                                   const char* )
+                                   const char* _challenge,
+                                   const char* _user_name,
+                                   const char* _response)
 {
+  //@todo
   return SUCCESS();
 }
 #endif

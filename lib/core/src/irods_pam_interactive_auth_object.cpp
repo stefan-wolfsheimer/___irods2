@@ -14,7 +14,7 @@ namespace irods {
 // =-=-=-=-=-=-=-
 // public - ctor
     pam_interactive_auth_object::pam_interactive_auth_object(rError_t* _r_error ) :
-      auth_object( _r_error ),_verbose_level(0)
+      auth_object( _r_error ),_verbose_level(0),do_echo_(false)
     {
     } // ctor
 
@@ -31,6 +31,8 @@ namespace irods {
         user_name_   = _rhs.user_name_;
         zone_name_   = _rhs.zone_name_;
         context_     = _rhs.context_;
+        _verbose_level = _rhs._verbose_level;
+        do_echo_ = _rhs.do_echo_;
     }
 
 // =-=-=-=-=-=-=-
@@ -40,6 +42,8 @@ namespace irods {
         auth_object::operator=( _rhs );
         user_name_   = _rhs.user_name_;
         zone_name_   = _rhs.zone_name_;
+        _verbose_level = _rhs._verbose_level;
+        do_echo_ = _rhs.do_echo_;
         return *this;
     }
 
@@ -116,7 +120,7 @@ namespace irods {
         // all we have in this object is the auth results
         _kvp["zone_name"] = zone_name_.c_str();
         _kvp["user_name"] = user_name_.c_str();
-        
+        _kvp["digest"]    = digest_.c_str();
         return SUCCESS();
 
     } // get_re_vars
@@ -131,6 +135,27 @@ namespace irods {
   {
     _verbose_level = level;
     return level;
+  }
+
+  bool pam_interactive_auth_object::do_echo() const
+  {
+    return do_echo_;
+  }
+
+  bool pam_interactive_auth_object::do_echo(bool b)
+  {
+    do_echo_ = b;
+    return do_echo_;
+  }
+
+  std::string pam_interactive_auth_object::digest() const
+  {
+    return digest_;
+  }
+
+  void pam_interactive_auth_object::digest(const std::string& _dd)
+  {
+    digest_ = _dd;
   }
 
 }; // namespace irods

@@ -275,9 +275,6 @@ int clientLogin(
             if ( irods::AUTH_PAM_SCHEME == auth_scheme ) {
                 auth_scheme = irods::AUTH_NATIVE_SCHEME;
             }
-            if ( irods::AUTH_PAM_INTERACTIVE_SCHEME == auth_scheme ) {
-                auth_scheme = irods::AUTH_NATIVE_SCHEME;
-            }
         } // if _scheme_override
     } // if client side auth
 
@@ -331,21 +328,15 @@ int clientLogin(
     // send the auth response to the agent
     ret = auth_plugin->call <rcComm_t* > ( NULL, irods::AUTH_CLIENT_AUTH_RESPONSE, auth_obj, _comm );
     if ( !ret.ok() ) {
-        printError(
-            _comm,
-            ret.code(),
-            ( char* )ret.result().c_str() );
-        return ret.code();
+      printError(_comm,
+                 ret.code(),
+                 ( char* )ret.result().c_str() );
+      return ret.code();
     }
-
     // =-=-=-=-=-=-=-
     // set the flag stating we are logged in
     _comm->loggedIn = 1;
-
-    // =-=-=-=-=-=-=-
-    // win!
     return 0;
-
 } // clientLogin
 
 int

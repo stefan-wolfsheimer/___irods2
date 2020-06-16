@@ -14,6 +14,11 @@
     }                                                                 \
   }
 
-std::string pam_input(const std::string & message, nlohmann::json & j);
-std::string pam_input_password(const std::string & message, nlohmann::json & j);
-int save_conversation(const nlohmann::json & json_conversation, int VERBOSE_LEVEL);
+namespace PamHandshake
+{
+  std::string get_conversation_file();
+  std::string pam_input(const std::string & message, nlohmann::json & j, bool do_echo=true);
+  std::string pam_input_password(const std::string & message, nlohmann::json & j, bool do_echo=true);
+  void save_conversation(const nlohmann::json & json_conversation, int VERBOSE_LEVEL);
+  nlohmann::json load_conversation(int VERBOSE_LEVEL);
+}

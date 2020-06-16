@@ -44,8 +44,15 @@ namespace irods {
 
             int verbose_level() const;
             int verbose_level(int level);
+            bool do_echo() const;
+            bool do_echo(bool b);
+            std::string digest() const;
+            void digest( const std::string& _dd );
+
         private:
             int _verbose_level;
+            std::string digest_;
+            bool do_echo_;
     }; // class pam_auth_object
 
 /// @brief Helpful typedef
