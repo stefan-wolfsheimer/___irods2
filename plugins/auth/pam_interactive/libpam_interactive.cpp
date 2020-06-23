@@ -1,3 +1,4 @@
+
 // =-=-=-=-=-=-=-
 // irods includes
 #define USE_SSL 1
@@ -216,14 +217,16 @@ static bool pam_auth_delete_session(rcComm_t* _comm, const std::string & session
 void setSessionSignatureClientside(char* _sig);
 irods::error pam_auth_client_request(irods::plugin_context& _ctx, rcComm_t* _comm )
 {
-    if(!_ctx.valid< irods::pam_interactive_auth_object >().ok())
-    {
-      return ERROR(SYS_INVALID_INPUT_PARAM, "invalid plugin context" );
-    }
-    else if(!_comm)
-    {
-      return ERROR(SYS_INVALID_INPUT_PARAM, "null comm ptr" );
-    }
+  if(!_ctx.valid< irods::pam_interactive_auth_object >().ok())
+  {
+    return ERROR(SYS_INVALID_INPUT_PARAM, "invalid plugin context" );
+  }
+  else if(!_comm)
+  {
+    return ERROR(SYS_INVALID_INPUT_PARAM, "null comm ptr" );
+  }
+  else
+  {
     auto ptr = boost::dynamic_pointer_cast <irods::pam_interactive_auth_object >(_ctx.fco());
     bool using_ssl = (irods::CS_NEG_USE_SSL == _comm->negotiation_results );
     int VERBOSE_LEVEL = ptr->verbose_level();
@@ -441,6 +444,7 @@ irods::error pam_auth_client_request(irods::plugin_context& _ctx, rcComm_t* _com
       }
       //free( req_out );
     }
+  }
 } // pam_auth_client_request
 
 static std::string serialize_ordered(const nlohmann::json & j)
@@ -529,13 +533,14 @@ irods::error pam_auth_client_response(irods::plugin_context& _ctx,
 #ifdef RODS_SERVER
 irods::error pam_auth_agent_request(irods::plugin_context& _ctx )
 {
+  static const std::string empty_string;
   bool unixSocket = true;
   bool verbose = true;
   long port = 8080;
   std::string addr = "/var/pam_handshake.socket";
   int http_code;
   std::string session;
-#if 0
+#if 1
     // @Todo
     // =-=-=-=-=-=-=-
     // validate incoming parameters
@@ -650,13 +655,14 @@ irods::error pam_auth_agent_request(irods::plugin_context& _ctx )
         else if(itr->second == "PUT")
         {
           auto aitr = kvp.find("ANSWER");
+          const std::string & answer((aitr == kvp.end()) ? empty_string : aitr->second);
           std::tie(http_code,
                    state_str,
                    message) = PamHandshake::pam_handshake_put(unixSocket,
                                                               addr,
                                                               port,
                                                               session,
-                                                              ((aitr == kvp.end()) ? std::string("") : aitr->second),
+                                                              answer,
                                                               verbose);
           if(state_str == "NOT_AUTHENTICATED" ||
              state_str == "STATE_AUTHENTICATED" ||
